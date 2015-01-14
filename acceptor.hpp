@@ -39,6 +39,7 @@ public:
       , m_acceptor(service,m_endpoint)
     {}
 
+    
     boost::system::error_code accept(endpoint & endpoint, std::string path) {
         boost::asio::local::stream_protocol::socket socket(m_io_service);
         
@@ -59,6 +60,8 @@ public:
         
         return boost::system::error_code();
     }
+    
+    // TODO: async_accept
 private:
     boost::asio::io_service & m_io_service;
     

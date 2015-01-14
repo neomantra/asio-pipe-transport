@@ -27,6 +27,16 @@ public:
       , m_output(service)
     {}
 
+    /// Establish a pipe connection by connecting to a pipe transport acceptor
+    /**
+     * Connect to a pipe transport acceptor listening at the given Unix domain
+     * socket path. Once connected, a pair of pipes will be allocated and
+     * exchanged. Once this is successful, the socket will be closed and future
+     * reads and writes will occur using these pipes.
+     *
+     * @param path The path to a Unix domain socket to connect to
+     * @return A status code indicating the error that ocurred, if any
+     */
     boost::system::error_code connect(std::string path) {
         boost::system::error_code ec;
         
@@ -60,7 +70,10 @@ public:
         
         return boost::system::error_code();
     }
+    
+    // TODO: async_connect
 
+    // consider moving this to the acceptor class?
     template <typename Socket>
     boost::system::error_code init_pipes(Socket & socket) {
         // create pipes
@@ -105,26 +118,80 @@ public:
 
     // forward the appropriate read/write interfaces to behave like an asio
     // sync/async stream
+    
+    /// Read some data from the socket
+    /**
+     * This function is used to read data from the stream socket. The function
+     * call will block until one or more bytes of data has been read 
+     * successfully, or until an error occurs.
+     *
+     * As with other asio `read_some` methods, this may not read all the bytes
+     * available. Consider `boost::asio::read` to read all.
+     *
+     * @param buffers One or more buffers into which the data will be read.
+     * @return The number of bytes read.
+     */
     template<typename MutableBufferSequence>
     std::size_t read_some(const MutableBufferSequence & buffers) {
         return m_input.read_some(buffers);
     }
     
+    /// Read some data from the socket (exception free)
+    /**
+     * This function is used to read data from the stream socket. The function
+     * call will block until one or more bytes of data has been read 
+     * successfully, or until an error occurs.
+     *
+     * As with other asio `read_some` methods, this may not read all the bytes
+     * available. Consider `boost::asio::read` to read all.
+     *
+     * @param buffers One or more buffers into which the data will be read.
+     * @param ec Set to indicate what error occurred, if any.
+     * @return The number of bytes read. Returns 0 if an error occurred.
+     */
     template<typename MutableBufferSequence>
     std::size_t read_some(const MutableBufferSequence & buffers, boost::system::error_code & ec) {
         return m_input.read_some(buffers,ec);
     }
     
+    /// Write some data to the socket.
+    /**
+     * This function is used to write data to the stream socket. The function 
+     * call will block until one or more bytes of the data has been written 
+     * successfully, or until an error occurs.
+     *
+     * As with other asio `write_some` methods, this may not write all the bytes
+     * in the buffer. Consider `boost::asio::write` to write all.
+     *
+     * @param One or more data buffers to be written to the socket.
+     * @return The number of bytes written.
+     */
     template<typename ConstBufferSequence>
     std::size_t write_some(const ConstBufferSequence & buffers) {
         return m_output.write_some(buffers);
     }
     
+    /// Write some data to the socket. (exception free)
+    /**
+     * This function is used to write data to the stream socket. The function 
+     * call will block until one or more bytes of the data has been written 
+     * successfully, or until an error occurs.
+     *
+     * As with other asio `write_some` methods, this may not write all the bytes
+     * in the buffer. Consider `boost::asio::write` to write all.
+     *
+     * @param One or more data buffers to be written to the socket.
+     * @param ec Set to indicate what error occurred, if any.
+     * @return The number of bytes written. Returns 0 if an error occurred.
+     */
     template<typename ConstBufferSequence>
     std::size_t write_some(const ConstBufferSequence & buffers, boost::system::error_code & ec) {
         return m_output.write_some(buffers);
     }
+    
+    // TODO: async read/write stream methods
 private:
+    /// Serialize and send a file descriptor over a socket
     static boost::system::error_code send_fd(int socket, int fd) {
         struct msghdr msg;
         struct iovec iov[1];
@@ -164,6 +231,7 @@ private:
         return boost::system::error_code();
     }
 
+    /// Receive and unserialize a file descriptor over a socket
     static int recv_fd(int socket, boost::system::error_code & ec) {
         ec = boost::system::error_code();
         
@@ -208,6 +276,17 @@ private:
         return -1;
     }
 
+    // TODO: should these errno translating methods be combined? Is there value
+    // in only inspecting error codes that are supposed to be producable via
+    // each call?
+
+    /// Translate sendmsg errno to `boost::system::error_code`
+    /**
+     * Inspects errno following a call to `sendmsg` and returns the appropriate
+     * associated `boost::system::error_code`.
+     *
+     * @return The `system::error_code` that corresponds to the value of errno
+     */
     static boost::system::error_code process_sendmsg_error() {
         namespace errc = boost::system::errc;
         

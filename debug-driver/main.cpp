@@ -24,17 +24,22 @@ int main(int argc, const char * argv[]) {
     if (selection == "server") {
         ::unlink("/tmp/foo");
         asio_pipe_transport::acceptor a(service,"/tmp/foo");
-        asio_pipe_transport::endpoint e(service);
         
-        ec = a.accept(e,"/tmp/foo");
-        
-        if (ec) {
-            std::cout << "accept failed: " << ec.message() << std::endl;
-            return 1;
+        while (1) {
+            asio_pipe_transport::endpoint e(service);
+            
+            ec = a.accept(e);
+            
+            if (ec) {
+                std::cout << "accept failed: " << ec.message() << std::endl;
+                return 1;
+            } else {
+            std::cout << "accept succeeded" << std::endl;
         }
-        
-        std::cout << "testing a write over the pipe" << std::endl;
-        boost::asio::write(e, boost::asio::buffer("foo", 3));
+            
+            std::cout << "testing a write over the pipe" << std::endl;
+            boost::asio::write(e, boost::asio::buffer("foo", 3));
+        }
     } else {
         asio_pipe_transport::endpoint e(service);
         
@@ -42,6 +47,8 @@ int main(int argc, const char * argv[]) {
         if (ec) {
             std::cout << "connect failed: " << ec.message() << std::endl;
             return 1;
+        } else {
+            std::cout << "connect succeeded" << std::endl;
         }
         
         char data[10];

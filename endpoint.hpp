@@ -21,6 +21,20 @@ namespace asio_pipe_transport {
 
 class endpoint {
 public:
+    
+    /// Construct a pipe transport endpoint
+    /**
+     * Construct a pipe transport endpoint and register it with the io_service
+     * that will be used to handle read/write operations.
+     *
+     * The newly constructed endpoint will be in an uninitialized state suitable
+     * for either passing to the `accept` method of an acceptor or calling the
+     * endpoint's `connect` method to establish a connection. Once established
+     * using one of these two options, read and write operations may be done on
+     * the stream using the asio stream I/O free functions.
+     *
+     * @param service The io_service this endpoint will use
+     */
     endpoint (boost::asio::io_service & service)
       : m_io_service(service)
       , m_input(service)
@@ -62,7 +76,11 @@ public:
             return ec;
         }
         
-        // TODO: send ack
+        // send ack
+        boost::asio::write(socket, boost::asio::buffer("ack", 3), ec);
+        if (ec) {
+            return error::make_error_code(error::ack_failed);
+        }
         
         // test client input
         m_input.assign(::dup(recv_pipe));
@@ -111,7 +129,12 @@ public:
         ec = send_fd(socket.native_handle(), c2s_pipe[1]);
         if (ec) {return ec;}
         
-        // TODO: wait for ack
+        // wait for ack
+        char data[3];
+        size_t read = boost::asio::read(socket, boost::asio::buffer(data, 3), ec);
+        if (ec || read != 3 || strncmp(data, "ack", 3) != 0) {
+            return error::make_error_code(error::ack_failed);
+        }
         
         return boost::system::error_code();
     }
@@ -163,7 +186,7 @@ public:
      * As with other asio `write_some` methods, this may not write all the bytes
      * in the buffer. Consider `boost::asio::write` to write all.
      *
-     * @param One or more data buffers to be written to the socket.
+     * @param buffers One or more data buffers to be written to the socket.
      * @return The number of bytes written.
      */
     template<typename ConstBufferSequence>
@@ -180,7 +203,7 @@ public:
      * As with other asio `write_some` methods, this may not write all the bytes
      * in the buffer. Consider `boost::asio::write` to write all.
      *
-     * @param One or more data buffers to be written to the socket.
+     * @param buffers One or more data buffers to be written to the socket.
      * @param ec Set to indicate what error occurred, if any.
      * @return The number of bytes written. Returns 0 if an error occurred.
      */
@@ -189,7 +212,44 @@ public:
         return m_output.write_some(buffers);
     }
     
-    // TODO: async read/write stream methods
+    /// Start an asynchronous read.
+    /**
+     * This function is used to asynchronously read data from the input pipe.
+     * The function call always returns immediately.
+     *
+     * Note: all of the behaviors and restrictions associated with
+     * `basic_stream_socket::async_read_some` apply here. Please consult the
+     * boost documentation for that method for more details.
+     *
+     * @param buffers One or more buffers into which the data will be read.
+     * @param handler The handler to be called when the read operation completes.
+     */
+    template<typename MutableBufferSequence, typename ReadHandler>
+    void async_read_some(const MutableBufferSequence & buffers, ReadHandler handler) {
+        m_input.async_read_some(buffers, handler);
+    }
+    
+    /// Start an asynchronous write.
+    /**
+     * This function is used to asynchronously write data to the output pipe.
+     * The function call always returns immediately.
+     *
+     * Note: all of the behaviors and restrictions associated with
+     * `basic_stream_socket::async_write_some` apply here. Please consult the
+     * boost documentation for that method for more details.
+     *
+     * @param buffers One or more data buffers to be written to the socket.
+     * @param handler The handler to be called when the write operation completes.
+     */
+    template<typename ConstBufferSequence, typename WriteHandler>
+    void async_write_some(const ConstBufferSequence & buffers, WriteHandler handler) {
+        m_output.async_write_some(buffers, handler);
+    }
+    
+    /// Returns the io_service object being used
+    boost::asio::io_service & get_io_service() {
+        return m_io_service;
+    }
 private:
     /// Serialize and send a file descriptor over a socket
     static boost::system::error_code send_fd(int socket, int fd) {

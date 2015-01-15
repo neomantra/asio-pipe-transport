@@ -21,7 +21,10 @@ enum value {
     general = 1,
     
     /// Unknown errno value from system function
-    unknown_system_error
+    unknown_system_error,
+    
+    /// Acknowledgement failed
+    ack_failed
 }; // enum value
 
 class category : public boost::system::error_category {
@@ -38,6 +41,8 @@ public:
                 return "Generic error";
             case error::unknown_system_error:
                 return "Unknown errno value from system function";
+            case error::ack_failed:
+                return "Pipe establishment acknowledgement failed";
             default:
                 return "Unknown";
         }

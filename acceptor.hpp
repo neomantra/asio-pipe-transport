@@ -33,14 +33,36 @@ namespace asio_pipe_transport {
 
 class acceptor {
 public:
+    /// Construct a pipe transport acceptor
+    /**
+     * Construct a pipe transport acceptor and register it with an io_service
+     * and path. Once constructed, use the `accept` method to accept new
+     * connections
+     *
+     * @param service The io_service this acceptor will use
+     * @param path The Unix domain socket path to accept connections on
+     */
     acceptor (boost::asio::io_service & service, std::string path)
       : m_io_service(service)
       , m_endpoint(path)
       , m_acceptor(service,m_endpoint)
     {}
 
-    
-    boost::system::error_code accept(endpoint & endpoint, std::string path) {
+    /// Accept a new pipe transport connection
+    /**
+     * Waits for a connection on the Unix domain socket at this acceptors path.
+     * When a connection is opened, use it to negotiate a pair of anonymous
+     * pipes connecting the endpoint supplied with the remote connecting
+     * endpoint.
+     *
+     * When this method returns without error, `endpoint` will be in a connected
+     * state ready to read and write data over pipes to its associated remote
+     * endpoint.
+     *
+     * @param endpoint The endpoint to connect
+     * @return A status code indicating the error that ocurred, if any
+     */
+    boost::system::error_code accept(endpoint & endpoint) {
         boost::asio::local::stream_protocol::socket socket(m_io_service);
         
         boost::system::error_code ec;
@@ -49,13 +71,6 @@ public:
         
         // generate and exchange pipes for further communication
         ec = endpoint.init_pipes(socket);
-        if (ec) {return ec;}
-        
-        // done with the unix socket now so close it
-        socket.shutdown(boost::asio::local::stream_protocol::socket::shutdown_both, ec);
-        if (ec) {return ec;}
-        
-        socket.close(ec);
         if (ec) {return ec;}
         
         return boost::system::error_code();

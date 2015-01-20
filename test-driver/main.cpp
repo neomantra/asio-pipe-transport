@@ -19,7 +19,7 @@ using asio_pipe_transport::endpoint;
 
 go_bandit([](){
 
-describe("asio_pipe_transport:", []() {
+describe("syncronous asio_pipe_transport", []() {
     std::unique_ptr<acceptor> acceptor;
     std::unique_ptr<endpoint> s_endpoint;
     std::unique_ptr<endpoint> s_endpoint2;
@@ -134,6 +134,71 @@ describe("asio_pipe_transport:", []() {
             AssertThat(c_ec, Equals(boost::system::error_code()));
         });
     });*/
+});
+
+describe("asyncronous asio_pipe_transport", []() {
+    std::unique_ptr<acceptor> acceptor;
+    std::unique_ptr<endpoint> s_endpoint;
+    std::unique_ptr<endpoint> c_endpoint;
+    std::unique_ptr<boost::asio::io_service> service;
+
+    before_each([&]() {
+        ::unlink("/tmp/test");
+        service.reset(new boost::asio::io_service());
+        acceptor.reset(new class acceptor(*service,"/tmp/test"));
+        s_endpoint.reset(new endpoint(*service));
+        c_endpoint.reset(new endpoint(*service));
+    });
+    
+    after_each([&]() {
+        ::unlink("/tmp/test");
+        c_endpoint.reset();
+        s_endpoint.reset();
+        acceptor.reset();
+        service.reset();
+    });
+
+    describe("asyncronously exchange data", [&]() {
+        boost::system::error_code s_ec;
+        boost::system::error_code c_ec;
+        
+        boost::system::error_code write_ec;
+        boost::system::error_code read_ec;
+        
+        char data[10];
+        size_t sent;
+        size_t read;
+        
+        before_each([&]() {
+            /*std::thread server([&](){
+                s_ec = acceptor->accept(*s_endpoint);
+            
+                if (!s_ec) {
+                    sent = boost::asio::write(*s_endpoint, boost::asio::buffer("foo", 3), write_ec);
+                }
+            });
+            std::thread client([&](){
+                c_ec = c_endpoint->connect("/tmp/test");
+        
+                if (!c_ec) {
+                    read = boost::asio::read(*c_endpoint, boost::asio::buffer(data, 3), read_ec);
+                }
+            });
+            server.join();
+            client.join();*/
+        });
+
+        it("should match", [&]() {
+            AssertThat(s_ec, Equals(boost::system::error_code()));
+            AssertThat(c_ec, Equals(boost::system::error_code()));
+            AssertThat(write_ec, Equals(boost::system::error_code()));
+            AssertThat(read_ec, Equals(boost::system::error_code()));
+            
+            AssertThat(sent, Equals(3));
+            AssertThat(read, Equals(3));
+            AssertThat(std::string(data,3), Equals("foo"));
+        });
+    });
 });
 
 });

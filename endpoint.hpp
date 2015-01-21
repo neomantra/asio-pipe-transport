@@ -12,6 +12,7 @@
 #include "error.hpp"
 
 #include <boost/asio.hpp>
+#include <boost/bind.hpp>
 
 #include <iostream>
 
@@ -19,9 +20,41 @@
 
 namespace asio_pipe_transport {
 
+/// TODO
+/// Where should this class live?
+class recv_msghdr {
+public:
+    recv_msghdr()
+      : ctrl(NULL)
+    {
+        memset(&msg, 0, sizeof(struct msghdr));
+        memset(ctrl_buf, 0, CMSG_SPACE(sizeof(int)));
+
+        iov[0].iov_base = data;
+        iov[0].iov_len = sizeof(data);
+
+        msg.msg_name = NULL;
+        msg.msg_namelen = 0;
+        msg.msg_iov = iov;
+        msg.msg_iovlen = 1;
+        msg.msg_controllen =  CMSG_SPACE(sizeof(int));
+        msg.msg_control = ctrl_buf;
+    }
+
+    struct msghdr msg;
+    struct iovec iov[1];
+    struct cmsghdr *ctrl;
+    
+    char ctrl_buf[CMSG_SPACE(sizeof(int))];
+    char data[1];
+};
+
+typedef boost::shared_ptr<recv_msghdr> recv_msghdr_ptr;
+
 class endpoint {
 public:
-    
+    typedef boost::shared_ptr<boost::asio::local::stream_protocol::socket> socket_ptr;
+
     /// Construct a pipe transport endpoint
     /**
      * Construct a pipe transport endpoint and register it with the io_service
@@ -66,12 +99,16 @@ public:
         int recv_pipe;
         
         // receive s2c pipe endpoint
-        recv_pipe = recv_fd(socket.native_handle(), ec);
+        recv_msghdr_ptr recv_msghdr(new class recv_msghdr());
+        recv_pipe = recv_fd(socket.native_handle(), recv_msghdr, ec);
         if (ec) {
             return ec;
         }
+
+        recv_msghdr.reset(new class recv_msghdr());
+
         // receive c2s pipe endpoint
-        send_pipe = recv_fd(socket.native_handle(), ec);
+        send_pipe = recv_fd(socket.native_handle(), recv_msghdr, ec);
         if (ec) {
             return ec;
         }
@@ -88,9 +125,109 @@ public:
         
         return boost::system::error_code();
     }
-    
-    // TODO: async_connect
 
+    /// TODO
+    template <typename ConnectHandler>
+    void async_connect(std::string path, ConnectHandler handler) {
+        boost::asio::local::stream_protocol::endpoint ep(path);
+        socket_ptr socket(new boost::asio::local::stream_protocol::socket(m_io_service));
+
+        socket->async_connect(ep,boost::bind(
+            &endpoint::handle_connect<ConnectHandler>,
+            this,
+            socket,
+            handler,
+            ::_1
+        ));
+    }
+
+    /// TODO
+    template <typename ConnectHandler>
+    void handle_connect(socket_ptr socket, ConnectHandler handler, const boost::system::error_code & connect_ec) {
+        if (connect_ec) {
+            handler(connect_ec);
+            return;
+        }
+
+        boost::system::error_code ec;
+
+        recv_msghdr_ptr msghdr_ptr(new class recv_msghdr());
+
+        // start the task to asyncronously receive the s2c pipe endpoint
+        async_recv_fd(msghdr_ptr, socket, handler);
+    }
+
+    /// TODO
+    template <typename ConnectHandler>
+    void async_recv_fd(recv_msghdr_ptr msghdr_ptr, socket_ptr socket, ConnectHandler handler) {
+        boost::system::error_code ec;
+        int pipe = recv_fd(socket->native_handle(), msghdr_ptr, ec);
+        if (ec) {
+            if (ec == boost::system::errc::make_error_code(boost::system::errc::operation_would_block)) {
+                // If the error is "would block" push an async task to wait until
+                // this socket is ready.
+                socket->async_read_some(boost::asio::null_buffers(),boost::bind(
+                    &endpoint::handle_recv_fd<ConnectHandler>,
+                    this,msghdr_ptr,socket,handler,::_1
+                ));
+            } else {
+                handler(ec);
+            }
+            return;
+        }
+
+        // TODO: is `is_open` the best way to test this? State variable instead?
+        // TODO: clean up fds? Does asio's RIAA take care of this?
+        if (!m_input.is_open()) {
+            m_input.assign(::dup(pipe));
+
+            // start reading output pipe
+            msghdr_ptr.reset(new class recv_msghdr());
+
+            async_recv_fd(msghdr_ptr, socket, handler);
+        } else if (!m_output.is_open()) {
+            m_output.assign(::dup(pipe));
+
+            // send ack
+            boost::asio::async_write(
+                *socket,
+                boost::asio::buffer("ack", 3),
+                boost::bind(
+                    &endpoint::handle_write_ack<ConnectHandler>,
+                    this,
+                    socket,
+                    handler,
+                    ::_1,
+                    ::_2
+                )
+            );
+        } else {
+            handler(make_error_code(error::general));
+        }
+    }
+
+    /// TODO
+    template <typename ConnectHandler>
+    void handle_recv_fd(recv_msghdr_ptr msghdr_ptr, socket_ptr socket, ConnectHandler handler, const boost::system::error_code & ec) {
+        if (ec) {
+            handler(ec);
+        } else {
+            // retry
+            async_recv_fd(msghdr_ptr, socket, handler);
+        }
+    }
+
+    /// TODO
+    template <typename ConnectHandler>
+    void handle_write_ack(socket_ptr socket, ConnectHandler handler, const boost::system::error_code & ec, size_t bytes_transferred) {
+        if (ec) {
+            handler(error::make_error_code(error::ack_failed));
+        } else {
+            handler(ec);
+        }
+    }
+
+    /// TODO
     // consider moving this to the acceptor class?
     template <typename Socket>
     boost::system::error_code init_pipes(Socket & socket) {
@@ -121,7 +258,7 @@ public:
         // TODO: these may be semi-blocking.
         // send s2c pipe endpoint
         boost::system::error_code ec;
-        
+
         ec = send_fd(socket.native_handle(), s2c_pipe[0]);
         if (ec) {return ec;}
         
@@ -132,6 +269,7 @@ public:
         // wait for ack
         char data[3];
         size_t read = boost::asio::read(socket, boost::asio::buffer(data, 3), ec);
+
         if (ec || read != 3 || strncmp(data, "ack", 3) != 0) {
             return error::make_error_code(error::ack_failed);
         }
@@ -139,8 +277,76 @@ public:
         return boost::system::error_code();
     }
 
-    // forward the appropriate read/write interfaces to behave like an asio
-    // sync/async stream
+    /// TODO
+    // consider moving this to the acceptor class?
+    template <typename AcceptHandler>
+    void async_init_pipes(socket_ptr socket, AcceptHandler handler) {
+        // create pipes
+        int s2c_pipe[2];
+        int c2s_pipe[2];
+        
+        if (pipe(s2c_pipe) == -1) {
+            handler(process_pipe_error());
+            return;
+        }
+        if (pipe(c2s_pipe) == -1) {
+            handler(process_pipe_error());
+            return;
+        }
+        
+        // client read: s2c_pipe[0] -> send this fd to client for reading
+        // server write: s2c_pipe[1] -> keep this fd local to write
+        // server read: c2s_pipe[0] -> keep this fd local to read
+        // client write: c2s_pipe[1] -> send this fd to client for writing
+                
+        // This input stream is where we will read data from the client
+        // TODO: do we need to duplicate the fds here?
+        m_input.assign(::dup(c2s_pipe[0]));
+        
+        // This output stream is where we will write data to the client
+        m_output.assign(::dup(s2c_pipe[1]));
+        
+        
+        // TODO: will send_fd block? Will it ever return EAGAIN/Would Block?
+        // send s2c pipe endpoint
+        boost::system::error_code ec;
+
+        ec = send_fd(socket->native_handle(), s2c_pipe[0]);
+        if (ec) {
+            handler(ec);
+            return;
+        }
+        
+        ec = send_fd(socket->native_handle(), c2s_pipe[1]);
+        if (ec) {
+            handler(ec);
+            return;
+        }
+        
+        // wait for ack
+        boost::asio::async_read(
+            *socket,
+            boost::asio::buffer(m_data, 3),
+            boost::bind(
+                &endpoint::handle_read_ack<AcceptHandler>,
+                this,
+                socket,
+                handler,
+                ::_1,
+                ::_2
+            )
+        );
+    }
+
+    /// TODO
+    template <typename AcceptHandler>
+    void handle_read_ack(socket_ptr socket, AcceptHandler handler, const boost::system::error_code & ec, size_t bytes_transferred) {
+        if (ec || bytes_transferred != 3 || strncmp(m_data, "ack", 3) != 0) {
+            handler(error::make_error_code(error::ack_failed));
+        } else {
+            handler(ec);
+        }
+    }
     
     /// Read some data from the socket
     /**
@@ -251,6 +457,8 @@ public:
         return m_io_service;
     }
 private:
+
+
     /// Serialize and send a file descriptor over a socket
     static boost::system::error_code send_fd(int socket, int fd) {
         struct msghdr msg;
@@ -292,31 +500,11 @@ private:
     }
 
     /// Receive and unserialize a file descriptor over a socket
-    static int recv_fd(int socket, boost::system::error_code & ec) {
+    static int recv_fd(int socket, recv_msghdr_ptr msg_ptr, boost::system::error_code & ec) {
         ec = boost::system::error_code();
-        
-        struct msghdr msg;
-        struct iovec iov[1];
-        struct cmsghdr *ctrl = NULL;
-        
-        char ctrl_buf[CMSG_SPACE(sizeof(int))];
-        char data[1];
         ssize_t res;
         
-        memset(&msg, 0, sizeof(struct msghdr));
-        memset(ctrl_buf, 0, CMSG_SPACE(sizeof(int)));
-        
-        iov[0].iov_base = data;
-        iov[0].iov_len = sizeof(data);
-        
-        msg.msg_name = NULL;
-        msg.msg_namelen = 0;
-        msg.msg_iov = iov;
-        msg.msg_iovlen = 1;
-        msg.msg_controllen =  CMSG_SPACE(sizeof(int));
-        msg.msg_control = ctrl_buf;
-        
-        res = recvmsg(socket, &msg, 0);
+        res = recvmsg(socket, &msg_ptr->msg, 0);
         
         if(res < 0) {
             ec = process_recvmsg_error();
@@ -327,9 +515,9 @@ private:
             // we aren't expecting that right now though.
         }
         
-        for (ctrl = CMSG_FIRSTHDR(&msg); ctrl != NULL; ctrl = CMSG_NXTHDR(&msg,ctrl)) {
-            if( (ctrl->cmsg_level == SOL_SOCKET) && (ctrl->cmsg_type == SCM_RIGHTS) ) {
-                return *(reinterpret_cast<int *>(CMSG_DATA(ctrl)));
+        for (msg_ptr->ctrl = CMSG_FIRSTHDR(&msg_ptr->msg); msg_ptr->ctrl != NULL; msg_ptr->ctrl = CMSG_NXTHDR(&msg_ptr->msg,msg_ptr->ctrl)) {
+            if( (msg_ptr->ctrl->cmsg_level == SOL_SOCKET) && (msg_ptr->ctrl->cmsg_type == SCM_RIGHTS) ) {
+                return *(reinterpret_cast<int *>(CMSG_DATA(msg_ptr->ctrl)));
             }
         }
         
@@ -448,6 +636,9 @@ private:
     
     boost::asio::posix::stream_descriptor m_input;
     boost::asio::posix::stream_descriptor m_output;
+
+    // TODO: is there a better place to put this?
+    char m_data[3];
 };
 
 

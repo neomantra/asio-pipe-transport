@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 
 #include <boost/asio.hpp>
+#include <boost/bind.hpp>
 
 #ifndef BOOST_ASIO_HAS_LOCAL_SOCKETS
     static_assert("This version of Asio does not support local sockets");
@@ -33,6 +34,8 @@ namespace asio_pipe_transport {
 
 class acceptor {
 public:
+    typedef boost::shared_ptr<boost::asio::local::stream_protocol::socket> socket_ptr;
+
     /// Construct a pipe transport acceptor
     /**
      * Construct a pipe transport acceptor and register it with an io_service
@@ -75,8 +78,33 @@ public:
         
         return boost::system::error_code();
     }
-    
-    // TODO: async_accept
+
+    template <typename AcceptHandler>
+    void async_accept(endpoint & endpoint, AcceptHandler handler) {
+        socket_ptr socket(new boost::asio::local::stream_protocol::socket(m_io_service));
+
+        m_acceptor.async_accept(
+            *socket,
+            boost::bind(
+                &acceptor::handle_async_accept<AcceptHandler>,
+                this,
+                socket,
+                boost::ref(endpoint),
+                handler,
+                ::_1
+            )
+        );
+    }
+
+    template <typename AcceptHandler>
+    void handle_async_accept(socket_ptr socket, endpoint & endpoint, AcceptHandler handler, const boost::system::error_code & accept_ec) {
+        if (accept_ec) {
+            handler(accept_ec);
+            return;
+        }
+
+        endpoint.async_init_pipes(socket, handler);
+    }
 private:
     boost::asio::io_service & m_io_service;
     

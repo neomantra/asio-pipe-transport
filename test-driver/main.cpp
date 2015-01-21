@@ -170,22 +170,26 @@ describe("asyncronous asio_pipe_transport", []() {
         size_t read;
         
         before_each([&]() {
-            /*std::thread server([&](){
-                s_ec = acceptor->accept(*s_endpoint);
-            
-                if (!s_ec) {
-                    sent = boost::asio::write(*s_endpoint, boost::asio::buffer("foo", 3), write_ec);
-                }
+            acceptor->async_accept(*s_endpoint, [&](const boost::system::error_code & ec) {
+                boost::asio::async_write(*s_endpoint, boost::asio::buffer("foo", 3), [&](const boost::system::error_code & ec, std::size_t bytes_transferred) {
+                    s_ec = ec;
+                    sent = bytes_transferred;
+                });
             });
-            std::thread client([&](){
-                c_ec = c_endpoint->connect("/tmp/test");
-        
-                if (!c_ec) {
-                    read = boost::asio::read(*c_endpoint, boost::asio::buffer(data, 3), read_ec);
+
+            c_endpoint->async_connect("/tmp/test", [&](const boost::system::error_code & ec) {
+                if (ec) {
+                    c_ec = ec;
+                    return;
                 }
+
+                boost::asio::async_read(*c_endpoint, boost::asio::buffer(data, 3), [&](const boost::system::error_code & ec, std::size_t bytes_transferred) {
+                    c_ec = ec;
+                    read = bytes_transferred;
+                });
             });
-            server.join();
-            client.join();*/
+
+            service->run();
         });
 
         it("should match", [&]() {

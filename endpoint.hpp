@@ -20,10 +20,75 @@
 
 namespace asio_pipe_transport {
 
-/// TODO
-/// Where should this class live?
+namespace detail {
+
+/// Translate errno to `boost::system::error_code`
+/**
+ * Inspects errno following a system call and returns the appropriate associated
+ * `boost::system::error_code`. Note: presently only works with the subset of
+ * errno values that are typically returned by the system calls used by
+ * asio-pipe-transport. Unrecognized values will be returned as
+ * `asio_pipe_transport::error::unknown_system_error`.
+ *
+ * @return The `system::error_code` that corresponds to the value of errno
+ */
+boost::system::error_code process_errno() {
+    namespace errc = boost::system::errc;
+    
+    // separate case because EAGAIN and EWOULDBLOCK sometimes share a value
+    // which confuses the switch
+    if (errno == EAGAIN) {
+        return errc::make_error_code(errc::operation_would_block);
+    }
+    
+    switch(errno) {
+        case EACCES:
+            return errc::make_error_code(errc::permission_denied);
+        case EWOULDBLOCK:
+            return errc::make_error_code(errc::operation_would_block);
+        case EBADF:
+            return errc::make_error_code(errc::bad_file_descriptor);
+        case ECONNREFUSED:
+                return errc::make_error_code(errc::connection_refused);
+        case ECONNRESET:
+            return errc::make_error_code(errc::connection_reset);
+        case EDESTADDRREQ:
+            return errc::make_error_code(errc::destination_address_required);
+        case EFAULT:
+            return errc::make_error_code(errc::bad_address);
+        case EINTR:
+            return errc::make_error_code(errc::interrupted);
+        case EINVAL:
+            return errc::make_error_code(errc::invalid_argument);
+        case EISCONN:
+            return errc::make_error_code(errc::already_connected);
+        case EMSGSIZE:
+            return errc::make_error_code(errc::message_size);
+        case ENOBUFS:
+            return errc::make_error_code(errc::no_buffer_space);
+        case ENOMEM:
+            return errc::make_error_code(errc::not_enough_memory);
+        case ENOTCONN:
+            return errc::make_error_code(errc::not_connected);
+        case ENOTSOCK:
+            return errc::make_error_code(errc::not_a_socket);
+        case EOPNOTSUPP:
+            return errc::make_error_code(errc::operation_not_supported);
+        case EPIPE:
+            return errc::make_error_code(errc::broken_pipe);
+        case EMFILE:
+                return errc::make_error_code(errc::too_many_files_open);
+        case ENFILE:
+            return errc::make_error_code(errc::too_many_files_open_in_system);
+        default:
+            return error::make_error_code(error::unknown_system_error);
+    }
+}
+
 class recv_msghdr {
 public:
+    typedef boost::shared_ptr<recv_msghdr> ptr;
+    
     recv_msghdr()
       : ctrl(NULL)
     {
@@ -49,7 +114,109 @@ public:
     char data[1];
 };
 
-typedef boost::shared_ptr<recv_msghdr> recv_msghdr_ptr;
+class pipe_pair {
+public:
+    typedef boost::shared_ptr<pipe_pair> ptr;
+
+    int s2c_pipe[2];
+    int c2s_pipe[2];
+    char ack_data[3];
+    
+    pipe_pair() {
+        if (pipe(s2c_pipe) == -1) {
+            throw detail::process_errno();
+        }
+        if (pipe(c2s_pipe) == -1) {
+            // todo: check close errno
+            ::close(s2c_pipe[0]);
+            // todo: check close errno
+            ::close(s2c_pipe[1]);
+            throw detail::process_errno();
+        }
+        
+        memset(ack_data, 0, 3);
+    }
+    
+    ~pipe_pair() {
+        // todo: check close errno? Are there any cases where we actually care
+        // EBADF: almost certainly ignore all the time
+        // EINTR (signal interrupt): On linux, BSD we don't need to retry. POSIX
+        //       does not guarantee this behavior though and other operating
+        //       systems may not work this way.
+        // EIO (IO error): unclear if this can actually be triggered via pipes
+        ::close(s2c_pipe[0]);
+        ::close(s2c_pipe[1]);
+        ::close(c2s_pipe[0]);
+        ::close(c2s_pipe[1]);
+    }
+};
+
+/// Serialize and send a file descriptor over a socket
+void send_fd(int socket, int fd) {
+    struct msghdr msg;
+    struct iovec iov[1];
+    struct cmsghdr *ctrl = NULL;
+    
+    char ctrl_buf[CMSG_SPACE(sizeof(int))];
+    char data[1];
+    ssize_t res;
+    
+    memset(&msg, 0, sizeof(struct msghdr));
+    memset(ctrl_buf, 0, CMSG_SPACE(sizeof(int)));
+    
+    data[0] = ' ';
+    iov[0].iov_base = data;
+    iov[0].iov_len = sizeof(data);
+    
+    msg.msg_name = NULL;
+    msg.msg_namelen = 0;
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 1;
+    msg.msg_controllen =  CMSG_SPACE(sizeof(int));
+    msg.msg_control = ctrl_buf;
+    
+    ctrl = CMSG_FIRSTHDR(&msg);
+    ctrl->cmsg_level = SOL_SOCKET;
+    ctrl->cmsg_type = SCM_RIGHTS;
+    ctrl->cmsg_len = CMSG_LEN(sizeof(int));
+    
+    *(reinterpret_cast<int *>(CMSG_DATA(ctrl))) = fd;
+    
+    res = sendmsg(socket, &msg, 0);
+    
+    if (res == -1) {
+        throw detail::process_errno();
+    }
+}
+
+/// Receive and unserialize a file descriptor over a socket
+int recv_fd(int socket, recv_msghdr::ptr msg_ptr, boost::system::error_code & ec) {
+    ec = boost::system::error_code();
+    ssize_t res;
+    
+    res = recvmsg(socket, &msg_ptr->msg, 0);
+    
+    if(res < 0) {
+        ec = detail::process_errno();
+        return -1;
+    }
+    if (res == 0) {
+        // this indicates that the connection was cleanly closed.
+        // we aren't expecting that right now though.
+        ec = error::make_error_code(error::early_close);
+        return -1;
+    }
+    
+    for (msg_ptr->ctrl = CMSG_FIRSTHDR(&msg_ptr->msg); msg_ptr->ctrl != NULL; msg_ptr->ctrl = CMSG_NXTHDR(&msg_ptr->msg,msg_ptr->ctrl)) {
+        if( (msg_ptr->ctrl->cmsg_level == SOL_SOCKET) && (msg_ptr->ctrl->cmsg_type == SCM_RIGHTS) ) {
+            return *(reinterpret_cast<int *>(CMSG_DATA(msg_ptr->ctrl)));
+        }
+    }
+    
+    return -1;
+}
+
+} // namespace detail
 
 class endpoint {
 public:
@@ -86,6 +253,8 @@ public:
      */
     boost::system::error_code connect(std::string path) {
         boost::system::error_code ec;
+        boost::system::error_code cec;
+        int pipe;
         
         boost::asio::local::stream_protocol::endpoint ep(path);
         boost::asio::local::stream_protocol::socket socket(m_io_service);
@@ -95,33 +264,37 @@ public:
             return ec;
         }
         
-        int send_pipe;
-        int recv_pipe;
-        
         // receive s2c pipe endpoint
-        recv_msghdr_ptr recv_msghdr(new class recv_msghdr());
-        recv_pipe = recv_fd(socket.native_handle(), recv_msghdr, ec);
+        detail::recv_msghdr::ptr recv_msghdr(new class detail::recv_msghdr());
+        pipe = detail::recv_fd(socket.native_handle(), recv_msghdr, ec);
         if (ec) {
             return ec;
         }
+        m_input.assign(pipe);
 
-        recv_msghdr.reset(new class recv_msghdr());
+        recv_msghdr.reset(new class detail::recv_msghdr());
 
         // receive c2s pipe endpoint
-        send_pipe = recv_fd(socket.native_handle(), recv_msghdr, ec);
+        pipe = detail::recv_fd(socket.native_handle(), recv_msghdr, ec);
         if (ec) {
+            // TODO: check cec? Boost docs say that even if there is an error
+            // the descriptor will be closed. All we really care about is that
+            // the descriptor is cleaned up if it wasn't already.
+            m_input.close(cec);
             return ec;
         }
+        m_output.assign(pipe);
         
         // send ack
         boost::asio::write(socket, boost::asio::buffer("ack", 3), ec);
         if (ec) {
+            // TODO: check cec? Boost docs say that even if there is an error
+            // the descriptor will be closed. All we really care about is that
+            // the descriptor is cleaned up if it wasn't already.
+            m_input.close(cec);
+            m_output.close(cec);
             return error::make_error_code(error::ack_failed);
         }
-        
-        // test client input
-        m_input.assign(::dup(recv_pipe));
-        m_output.assign(::dup(send_pipe));
         
         return boost::system::error_code();
     }
@@ -143,7 +316,9 @@ public:
 
     /// TODO
     template <typename ConnectHandler>
-    void handle_connect(socket_ptr socket, ConnectHandler handler, const boost::system::error_code & connect_ec) {
+    void handle_connect(socket_ptr socket, ConnectHandler handler,
+        const boost::system::error_code & connect_ec)
+    {
         if (connect_ec) {
             handler(connect_ec);
             return;
@@ -151,7 +326,7 @@ public:
 
         boost::system::error_code ec;
 
-        recv_msghdr_ptr msghdr_ptr(new class recv_msghdr());
+        detail::recv_msghdr::ptr msghdr_ptr(new class detail::recv_msghdr());
 
         // start the task to asyncronously receive the s2c pipe endpoint
         async_recv_fd(msghdr_ptr, socket, handler);
@@ -159,9 +334,12 @@ public:
 
     /// TODO
     template <typename ConnectHandler>
-    void async_recv_fd(recv_msghdr_ptr msghdr_ptr, socket_ptr socket, ConnectHandler handler) {
+    void async_recv_fd(detail::recv_msghdr::ptr msghdr_ptr, socket_ptr socket,
+        ConnectHandler handler)
+    {
         boost::system::error_code ec;
-        int pipe = recv_fd(socket->native_handle(), msghdr_ptr, ec);
+        
+        int pipe = detail::recv_fd(socket->native_handle(), msghdr_ptr, ec);
         if (ec) {
             if (ec == boost::system::errc::make_error_code(boost::system::errc::operation_would_block)) {
                 // If the error is "would block" push an async task to wait until
@@ -171,22 +349,24 @@ public:
                     this,msghdr_ptr,socket,handler,::_1
                 ));
             } else {
+                // TODO: close fds? Technically they will be wrapped in stream
+                // descriptors that own them. We could potentially close fds
+                // a bit sooner than endpoint destruction. Is it worth it?
                 handler(ec);
             }
             return;
         }
 
         // TODO: is `is_open` the best way to test this? State variable instead?
-        // TODO: clean up fds? Does asio's RIAA take care of this?
         if (!m_input.is_open()) {
-            m_input.assign(::dup(pipe));
+            m_input.assign(pipe);
 
             // start reading output pipe
-            msghdr_ptr.reset(new class recv_msghdr());
+            msghdr_ptr.reset(new class detail::recv_msghdr());
 
             async_recv_fd(msghdr_ptr, socket, handler);
         } else if (!m_output.is_open()) {
-            m_output.assign(::dup(pipe));
+            m_output.assign(pipe);
 
             // send ack
             boost::asio::async_write(
@@ -202,14 +382,22 @@ public:
                 )
             );
         } else {
+            // TODO: close fds? Technically they will be wrapped in stream
+            // descriptors that own them. We could potentially close fds
+            // a bit sooner than endpoint destruction. Is it worth it?
             handler(make_error_code(error::general));
         }
     }
 
     /// TODO
     template <typename ConnectHandler>
-    void handle_recv_fd(recv_msghdr_ptr msghdr_ptr, socket_ptr socket, ConnectHandler handler, const boost::system::error_code & ec) {
+    void handle_recv_fd(detail::recv_msghdr::ptr msghdr_ptr, socket_ptr socket,
+        ConnectHandler handler, const boost::system::error_code & ec)
+    {
         if (ec) {
+            // TODO: close fds? Technically they will be wrapped in stream
+            // descriptors that own them. We could potentially close fds
+            // a bit sooner than endpoint destruction. Is it worth it?
             handler(ec);
         } else {
             // retry
@@ -219,8 +407,13 @@ public:
 
     /// TODO
     template <typename ConnectHandler>
-    void handle_write_ack(socket_ptr socket, ConnectHandler handler, const boost::system::error_code & ec, size_t bytes_transferred) {
+    void handle_write_ack(socket_ptr socket, ConnectHandler handler,
+        const boost::system::error_code & ec, size_t bytes_transferred)
+    {
         if (ec) {
+            // TODO: close fds? Technically they will be wrapped in stream
+            // descriptors that own them. We could potentially close fds
+            // a bit sooner than endpoint destruction. Is it worth it?
             handler(error::make_error_code(error::ack_failed));
         } else {
             handler(ec);
@@ -228,120 +421,74 @@ public:
     }
 
     /// TODO
-    // consider moving this to the acceptor class?
     template <typename Socket>
     boost::system::error_code init_pipes(Socket & socket) {
-        // create pipes
-        int s2c_pipe[2];
-        int c2s_pipe[2];
-        
-        if (pipe(s2c_pipe) == -1) {
-            return process_pipe_error();
-        }
-        if (pipe(c2s_pipe) == -1) {
-            return process_pipe_error();
-        }
-        
-        // client read: s2c_pipe[0] -> send this fd to client for reading
-        // server write: s2c_pipe[1] -> keep this fd local to write
-        // server read: c2s_pipe[0] -> keep this fd local to read
-        // client write: c2s_pipe[1] -> send this fd to client for writing
-                
-        // This input stream is where we will read data from the client
-        // TODO: do we need to duplicate the fds here?
-        m_input.assign(::dup(c2s_pipe[0]));
-        
-        // This output stream is where we will write data to the client
-        m_output.assign(::dup(s2c_pipe[1]));
-        
-        
-        // TODO: these may be semi-blocking.
-        // send s2c pipe endpoint
         boost::system::error_code ec;
-
-        ec = send_fd(socket.native_handle(), s2c_pipe[0]);
-        if (ec) {return ec;}
         
-        // send c2s pipe endpoint
-        ec = send_fd(socket.native_handle(), c2s_pipe[1]);
-        if (ec) {return ec;}
-        
-        // wait for ack
-        char data[3];
-        size_t read = boost::asio::read(socket, boost::asio::buffer(data, 3), ec);
+        try {
+            detail::pipe_pair pp;
+            
+            // Assign copies of the server side pipe endpoints to local stream
+            // descriptors
+            m_input.assign(::dup(pp.c2s_pipe[0]));
+            m_output.assign(::dup(pp.s2c_pipe[1]));
+            
+            // Send the remaining two pipe endpoints over the socket to the
+            // client.
+            detail::send_fd(socket.native_handle(), pp.s2c_pipe[0]);
+            detail::send_fd(socket.native_handle(), pp.c2s_pipe[1]);
+            
+            // wait for ack
+            size_t read = boost::asio::read(socket, boost::asio::buffer(pp.ack_data, 3), ec);
 
-        if (ec || read != 3 || strncmp(data, "ack", 3) != 0) {
-            return error::make_error_code(error::ack_failed);
+            if (ec || read != 3 || strncmp(pp.ack_data, "ack", 3) != 0) {
+                return error::make_error_code(error::ack_failed);
+            }
+            
+            return boost::system::error_code();
+        } catch(boost::system::error_code & ec) {
+            return ec;
         }
-        
-        return boost::system::error_code();
     }
 
     /// TODO
-    // consider moving this to the acceptor class?
     template <typename AcceptHandler>
     void async_init_pipes(socket_ptr socket, AcceptHandler handler) {
-        // create pipes
-        int s2c_pipe[2];
-        int c2s_pipe[2];
-        
-        if (pipe(s2c_pipe) == -1) {
-            handler(process_pipe_error());
-            return;
-        }
-        if (pipe(c2s_pipe) == -1) {
-            handler(process_pipe_error());
-            return;
-        }
-        
-        // client read: s2c_pipe[0] -> send this fd to client for reading
-        // server write: s2c_pipe[1] -> keep this fd local to write
-        // server read: c2s_pipe[0] -> keep this fd local to read
-        // client write: c2s_pipe[1] -> send this fd to client for writing
-                
-        // This input stream is where we will read data from the client
-        // TODO: do we need to duplicate the fds here?
-        m_input.assign(::dup(c2s_pipe[0]));
-        
-        // This output stream is where we will write data to the client
-        m_output.assign(::dup(s2c_pipe[1]));
-        
-        
-        // TODO: will send_fd block? Will it ever return EAGAIN/Would Block?
-        // send s2c pipe endpoint
-        boost::system::error_code ec;
-
-        ec = send_fd(socket->native_handle(), s2c_pipe[0]);
-        if (ec) {
+        try {
+            detail::pipe_pair::ptr pp(new detail::pipe_pair());
+                    
+            // Assign copies of the server side pipe endpoints to local stream
+            // descriptors
+            m_input.assign(::dup(pp->c2s_pipe[0]));
+            m_output.assign(::dup(pp->s2c_pipe[1]));
+            
+            // TODO: will send_fd block? Will it ever return EAGAIN/Would Block?
+            // Send the remaining two pipe endpoints over the socket to the
+            // client.
+            detail::send_fd(socket->native_handle(), pp->s2c_pipe[0]);
+            detail::send_fd(socket->native_handle(), pp->c2s_pipe[1]);
+            
+            // wait for ack
+            boost::asio::async_read(
+                *socket,
+                boost::asio::buffer(pp->ack_data, 3),
+                boost::bind(
+                    &endpoint::handle_read_ack<AcceptHandler>,
+                    this,socket,pp,handler,::_1,::_2
+                )
+            );
+        } catch (boost::system::error_code & ec) {
             handler(ec);
-            return;
         }
-        
-        ec = send_fd(socket->native_handle(), c2s_pipe[1]);
-        if (ec) {
-            handler(ec);
-            return;
-        }
-        
-        // wait for ack
-        boost::asio::async_read(
-            *socket,
-            boost::asio::buffer(m_data, 3),
-            boost::bind(
-                &endpoint::handle_read_ack<AcceptHandler>,
-                this,
-                socket,
-                handler,
-                ::_1,
-                ::_2
-            )
-        );
     }
 
     /// TODO
     template <typename AcceptHandler>
-    void handle_read_ack(socket_ptr socket, AcceptHandler handler, const boost::system::error_code & ec, size_t bytes_transferred) {
-        if (ec || bytes_transferred != 3 || strncmp(m_data, "ack", 3) != 0) {
+    void handle_read_ack(socket_ptr socket, detail::pipe_pair::ptr pp,
+        AcceptHandler handler, const boost::system::error_code & ec,
+        size_t bytes_transferred)
+    {
+        if (ec || bytes_transferred != 3 || strncmp(pp->ack_data, "ack", 3) != 0) {
             handler(error::make_error_code(error::ack_failed));
         } else {
             handler(ec);
@@ -457,188 +604,10 @@ public:
         return m_io_service;
     }
 private:
-
-
-    /// Serialize and send a file descriptor over a socket
-    static boost::system::error_code send_fd(int socket, int fd) {
-        struct msghdr msg;
-        struct iovec iov[1];
-        struct cmsghdr *ctrl = NULL;
-        
-        char ctrl_buf[CMSG_SPACE(sizeof(int))];
-        char data[1];
-        ssize_t res;
-        
-        memset(&msg, 0, sizeof(struct msghdr));
-        memset(ctrl_buf, 0, CMSG_SPACE(sizeof(int)));
-        
-        data[0] = ' ';
-        iov[0].iov_base = data;
-        iov[0].iov_len = sizeof(data);
-        
-        msg.msg_name = NULL;
-        msg.msg_namelen = 0;
-        msg.msg_iov = iov;
-        msg.msg_iovlen = 1;
-        msg.msg_controllen =  CMSG_SPACE(sizeof(int));
-        msg.msg_control = ctrl_buf;
-        
-        ctrl = CMSG_FIRSTHDR(&msg);
-        ctrl->cmsg_level = SOL_SOCKET;
-        ctrl->cmsg_type = SCM_RIGHTS;
-        ctrl->cmsg_len = CMSG_LEN(sizeof(int));
-        
-        *(reinterpret_cast<int *>(CMSG_DATA(ctrl))) = fd;
-        
-        res = sendmsg(socket, &msg, 0);
-        
-        if (res == -1) {
-            return process_sendmsg_error();
-        }
-        
-        return boost::system::error_code();
-    }
-
-    /// Receive and unserialize a file descriptor over a socket
-    static int recv_fd(int socket, recv_msghdr_ptr msg_ptr, boost::system::error_code & ec) {
-        ec = boost::system::error_code();
-        ssize_t res;
-        
-        res = recvmsg(socket, &msg_ptr->msg, 0);
-        
-        if(res < 0) {
-            ec = process_recvmsg_error();
-            return -1;
-        }
-        if (res == 0) {
-            // TODO: this indicates that the connection was cleanly closed.
-            // we aren't expecting that right now though.
-        }
-        
-        for (msg_ptr->ctrl = CMSG_FIRSTHDR(&msg_ptr->msg); msg_ptr->ctrl != NULL; msg_ptr->ctrl = CMSG_NXTHDR(&msg_ptr->msg,msg_ptr->ctrl)) {
-            if( (msg_ptr->ctrl->cmsg_level == SOL_SOCKET) && (msg_ptr->ctrl->cmsg_type == SCM_RIGHTS) ) {
-                return *(reinterpret_cast<int *>(CMSG_DATA(msg_ptr->ctrl)));
-            }
-        }
-        
-        return -1;
-    }
-
-    // TODO: should these errno translating methods be combined? Is there value
-    // in only inspecting error codes that are supposed to be producable via
-    // each call?
-
-    /// Translate sendmsg errno to `boost::system::error_code`
-    /**
-     * Inspects errno following a call to `sendmsg` and returns the appropriate
-     * associated `boost::system::error_code`.
-     *
-     * @return The `system::error_code` that corresponds to the value of errno
-     */
-    static boost::system::error_code process_sendmsg_error() {
-        namespace errc = boost::system::errc;
-        
-        // separate case because EAGAIN and EWOULDBLOCK sometimes share a value
-        // which confuses the switch
-        if (errno == EAGAIN) {
-            return errc::make_error_code(errc::operation_would_block);
-        }
-        
-        switch(errno) {
-            case EACCES:
-                return errc::make_error_code(errc::permission_denied);
-            case EWOULDBLOCK:
-                return errc::make_error_code(errc::operation_would_block);
-            case EBADF:
-                return errc::make_error_code(errc::bad_file_descriptor);
-            case ECONNRESET:
-                return errc::make_error_code(errc::connection_reset);
-            case EDESTADDRREQ:
-                return errc::make_error_code(errc::destination_address_required);
-            case EFAULT:
-                return errc::make_error_code(errc::bad_address);
-            case EINTR:
-                return errc::make_error_code(errc::interrupted);
-            case EINVAL:
-                return errc::make_error_code(errc::invalid_argument);
-            case EISCONN:
-                return errc::make_error_code(errc::already_connected);
-            case EMSGSIZE:
-                return errc::make_error_code(errc::message_size);
-            case ENOBUFS:
-                return errc::make_error_code(errc::no_buffer_space);
-            case ENOMEM:
-                return errc::make_error_code(errc::not_enough_memory);
-            case ENOTCONN:
-                return errc::make_error_code(errc::not_connected);
-            case ENOTSOCK:
-                return errc::make_error_code(errc::not_a_socket);
-            case EOPNOTSUPP:
-                return errc::make_error_code(errc::operation_not_supported);
-            case EPIPE:
-                return errc::make_error_code(errc::broken_pipe);
-            default:
-                return error::make_error_code(error::unknown_system_error);
-        }
-    }
-
-    static boost::system::error_code process_recvmsg_error() {
-        namespace errc = boost::system::errc;
-        
-        // separate case because EAGAIN and EWOULDBLOCK sometimes share a value
-        // which confuses the switch
-        if (errno == EAGAIN) {
-            return errc::make_error_code(errc::operation_would_block);
-        }
-        
-        switch(errno) {
-            case EWOULDBLOCK:
-                return errc::make_error_code(errc::operation_would_block);
-            case EBADF:
-                return errc::make_error_code(errc::bad_file_descriptor);
-            case ECONNREFUSED:
-                return errc::make_error_code(errc::connection_refused);
-            case EFAULT:
-                return errc::make_error_code(errc::bad_address);
-            case EINTR:
-                return errc::make_error_code(errc::interrupted);
-            case EINVAL:
-                return errc::make_error_code(errc::invalid_argument);
-            case ENOMEM:
-                return errc::make_error_code(errc::not_enough_memory);
-            case ENOTCONN:
-                return errc::make_error_code(errc::not_connected);
-            case ENOTSOCK:
-                return errc::make_error_code(errc::not_a_socket);
-            default:
-                return error::make_error_code(error::unknown_system_error);
-        }
-    }
-
-    static boost::system::error_code process_pipe_error() {
-        namespace errc = boost::system::errc;
-        
-        switch (errno) {
-            case EFAULT:
-                return errc::make_error_code(errc::bad_address);
-            case EINVAL:
-                return errc::make_error_code(errc::invalid_argument);
-            case EMFILE:
-                return errc::make_error_code(errc::too_many_files_open);
-            case ENFILE:
-                return errc::make_error_code(errc::too_many_files_open_in_system);
-            default:
-                return error::make_error_code(error::unknown_system_error);
-        }
-    }
-
     boost::asio::io_service & m_io_service;
     
     boost::asio::posix::stream_descriptor m_input;
     boost::asio::posix::stream_descriptor m_output;
-
-    // TODO: is there a better place to put this?
-    char m_data[3];
 };
 
 

@@ -24,7 +24,10 @@ enum value {
     unknown_system_error,
     
     /// Acknowledgement failed
-    ack_failed
+    ack_failed,
+    
+    /// Pipe exchange socket was closed unexpectedly early
+    early_close
 }; // enum value
 
 class category : public boost::system::error_category {
@@ -43,6 +46,8 @@ public:
                 return "Unknown errno value from system function";
             case error::ack_failed:
                 return "Pipe establishment acknowledgement failed";
+            case error::early_close:
+                return "The pipe exchange socket was closed unexpectedly early";
             default:
                 return "Unknown";
         }

@@ -79,6 +79,7 @@ public:
         return boost::system::error_code();
     }
 
+    /// TODO
     template <typename AcceptHandler>
     void async_accept(endpoint & endpoint, AcceptHandler handler) {
         socket_ptr socket(new boost::asio::local::stream_protocol::socket(m_io_service));
@@ -96,8 +97,11 @@ public:
         );
     }
 
+    /// TODO
     template <typename AcceptHandler>
-    void handle_async_accept(socket_ptr socket, endpoint & endpoint, AcceptHandler handler, const boost::system::error_code & accept_ec) {
+    void handle_async_accept(socket_ptr socket, endpoint & endpoint,
+        AcceptHandler handler, const boost::system::error_code & accept_ec)
+    {
         if (accept_ec) {
             handler(accept_ec);
             return;

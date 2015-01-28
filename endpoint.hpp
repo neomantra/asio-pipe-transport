@@ -32,7 +32,7 @@ namespace detail {
  *
  * @return The `system::error_code` that corresponds to the value of errno
  */
-boost::system::error_code process_errno() {
+static boost::system::error_code process_errno() {
     namespace errc = boost::system::errc;
     
     // separate case because EAGAIN and EWOULDBLOCK sometimes share a value
@@ -152,7 +152,7 @@ public:
 };
 
 /// Serialize and send a file descriptor over a socket
-void send_fd(int socket, int fd) {
+static void send_fd(int socket, int fd) {
     struct msghdr msg;
     struct iovec iov[1];
     struct cmsghdr *ctrl = NULL;
@@ -190,7 +190,7 @@ void send_fd(int socket, int fd) {
 }
 
 /// Receive and unserialize a file descriptor over a socket
-int recv_fd(int socket, recv_msghdr::ptr msg_ptr, boost::system::error_code & ec) {
+static int recv_fd(int socket, recv_msghdr::ptr msg_ptr, boost::system::error_code & ec) {
     ec = boost::system::error_code();
     ssize_t res;
     
@@ -236,9 +236,9 @@ public:
      * @param service The io_service this endpoint will use
      */
     endpoint (boost::asio::io_service & service)
-      : m_io_service(service)
-      , m_input(service)
-      , m_output(service)
+        : m_io_service(service)
+        , m_input(service)
+        , m_output(service)
     {}
 
     /// Establish a pipe connection by connecting to a pipe transport acceptor
@@ -562,7 +562,7 @@ public:
      */
     template<typename ConstBufferSequence>
     std::size_t write_some(const ConstBufferSequence & buffers, boost::system::error_code & ec) {
-        return m_output.write_some(buffers);
+        return m_output.write_some(buffers, ec); 
     }
     
     /// Start an asynchronous read.

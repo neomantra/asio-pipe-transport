@@ -24,24 +24,25 @@ namespace detail {
 
 /// Translate errno to `boost::system::error_code`
 /**
- * Inspects errno following a system call and returns the appropriate associated
- * `boost::system::error_code`. Note: presently only works with the subset of
- * errno values that are typically returned by the system calls used by
- * asio-pipe-transport. Unrecognized values will be returned as
+ * Returns the appropriate associated `boost::system::error_code` to the `error`
+ * parameter. Note: presently only works with the subset of errno values that 
+ * are typically returned by the system calls used by asio-pipe-transport. 
+ * Unrecognized values will be returned as 
  * `asio_pipe_transport::error::unknown_system_error`.
  *
+ * @param error The error number to translate
  * @return The `system::error_code` that corresponds to the value of errno
  */
-static boost::system::error_code process_errno() {
+static boost::system::error_code process_errno(int error) {
     namespace errc = boost::system::errc;
     
     // separate case because EAGAIN and EWOULDBLOCK sometimes share a value
     // which confuses the switch
-    if (errno == EAGAIN) {
+    if (error == EAGAIN) {
         return errc::make_error_code(errc::operation_would_block);
     }
     
-    switch(errno) {
+    switch(error) {
         case EACCES:
             return errc::make_error_code(errc::permission_denied);
         case EWOULDBLOCK:
@@ -85,6 +86,21 @@ static boost::system::error_code process_errno() {
     }
 }
 
+/// Translate errno to `boost::system::error_code`
+/**
+ * Inspects errno following a system call and returns the appropriate associated
+ * `boost::system::error_code`. Note: presently only works with the subset of
+ * errno values that are typically returned by the system calls used by
+ * asio-pipe-transport. Unrecognized values will be returned as
+ * `asio_pipe_transport::error::unknown_system_error`.
+ *
+ * @return The `system::error_code` that corresponds to the value of global errno
+ */
+static boost::system::error_code process_errno() {
+    return process_errno(errno);
+}
+
+/// Wrapper for the posix msghdr struct and other associated data
 class recv_msghdr {
 public:
     typedef boost::shared_ptr<recv_msghdr> ptr;
@@ -114,6 +130,14 @@ public:
     char data[1];
 };
 
+/// RAII wrapper for a pair of POSIX pipes
+/**
+ * Note: Error handling for closing file descriptors in the POSIX standard is
+ * not well defined. This implementation assumes that the `close()` system call
+ * will close the file descriptor in the case that it was interrupted by a
+ * signal. This is the case on Linux and BSD-like systems but may not be true on
+ * other POSIX systems.
+ */
 class pipe_pair {
 public:
     typedef boost::shared_ptr<pipe_pair> ptr;
@@ -127,18 +151,19 @@ public:
             throw detail::process_errno();
         }
         if (pipe(c2s_pipe) == -1) {
-            // todo: check close errno
+            int pipe_err = errno;
             ::close(s2c_pipe[0]);
-            // todo: check close errno
             ::close(s2c_pipe[1]);
-            throw detail::process_errno();
+            throw detail::process_errno(pipe_err);
         }
         
         memset(ack_data, 0, 3);
     }
     
     ~pipe_pair() {
-        // todo: check close errno? Are there any cases where we actually care
+        // Not checking close errno here as there aren't really any failure
+        // modes that we care about or could do anything about.
+        //
         // EBADF: almost certainly ignore all the time
         // EINTR (signal interrupt): On linux, BSD we don't need to retry. POSIX
         //       does not guarantee this behavior though and other operating
@@ -152,6 +177,10 @@ public:
 };
 
 /// Serialize and send a file descriptor over a socket
+/**
+ * @param socket The socket descriptor to write to
+ * @param fd The file descriptor to send
+ */
 static void send_fd(int socket, int fd) {
     struct msghdr msg;
     struct iovec iov[1];
@@ -190,6 +219,19 @@ static void send_fd(int socket, int fd) {
 }
 
 /// Receive and unserialize a file descriptor over a socket
+/**
+ * Depending on the socket's blocking mode, this function may return an error
+ * indicator (-1) and set ec to `errc::operation_would_block` if there are no
+ * bytes to be read in the socket. In this case the recv_fd function should be
+ * called again when more data is available until it returns cleanly or
+ * encounters a more serious error.
+ *
+ * @param socket The socket descriptor to read from
+ * @param msg_ptr A pointer to the recv_msghdr object to write into
+ * @param ec A status code indicating the error that ocurred, if any. Set if the
+ *        function returns -1
+ * @return The received file descriptor or -1 in the case of an error.
+ */
 static int recv_fd(int socket, recv_msghdr::ptr msg_ptr, boost::system::error_code & ec) {
     ec = boost::system::error_code();
     ssize_t res;
@@ -218,6 +260,29 @@ static int recv_fd(int socket, recv_msghdr::ptr msg_ptr, boost::system::error_co
 
 } // namespace detail
 
+/// Class that models one of the endpoints of a pipe transport connection
+/**
+ *
+ * General Usage:
+ * The pipe transport consists of an acceptor and a pair of endpoints. The
+ * acceptor binds to and listens for new connections on a Unix domain socket.
+ * It's `accept` and `async_accept` methods take an endpoint and perform the
+ * connect it to a second endpoint that connects to the acceptor using the
+ * `endpoint::connect` method.
+ *
+ * Once connected the acceptor generates a pair of anonymous POSIX pipes and
+ * exchanges the pipe descriptors with the connecting endpoint. Once this
+ * exchange is complete and acknowledged the underlying socket is closed.
+ *
+ * At this point accept/connect will return and both the server and client
+ * endpoints will be ready for reading or writing. All further communication
+ * happens over the pipes. The connected endpoint implements the Asio 
+ * SyncReadStream, SyncWriteStream, AsyncReadStream, and AsyncWriteStream
+ * interfaces so any of the usual asio methods such as boost::asio::read,
+ * boost::asio::write, boost::asio::async_read, boost::asio::async_write and 
+ * similar methods will work when passing the asio_pipe_transport::endpoint as
+ * the stream to read/write.
+ */
 class endpoint {
 public:
     typedef boost::shared_ptr<boost::asio::local::stream_protocol::socket> socket_ptr;
@@ -299,7 +364,31 @@ public:
         return boost::system::error_code();
     }
 
-    /// TODO
+    /// Start an asynchronous connect for a new pipe transport connection
+    /**
+     * This function is used to asynchronously initiate a pipe transport
+     * connection. The function call always returns immediately.
+     *
+     * Connect to a pipe transport acceptor listening at the given Unix domain
+     * socket path. Once connected, a pair of pipes will be allocated and
+     * exchanged. Once this is successful, the socket will be closed and future
+     * reads and writes will occur using these pipes.
+     *
+     * A sequence of asyncronous actions will be started that connect to a pipe
+     * transport acceptor listening at the given Unix domain socket path. Once
+     * connected, a pair of pipes will be allocated and exchanged. Once this is 
+     * successful, the socket will be closed and future reads and writes will
+     * occur using these pipes.
+     *
+     * When `handler` is called without error, `endpoint` will be in a connected
+     * state ready to read and write data over pipes to its associated remote
+     * endpoint.
+     *
+     * @param path The path to a Unix domain socket to connect to
+     * @param handler The handler to be called when the connect operation
+     *        completes. All typical rules for an Asio asyncronous handler apply
+     *        please consult Asio documentation for more details.
+     */
     template <typename ConnectHandler>
     void async_connect(std::string path, ConnectHandler handler) {
         boost::asio::local::stream_protocol::endpoint ep(path);
@@ -307,120 +396,17 @@ public:
 
         socket->async_connect(ep,boost::bind(
             &endpoint::handle_connect<ConnectHandler>,
-            this,
-            socket,
-            handler,
-            ::_1
+            this,socket,handler,::_1
         ));
     }
 
-    /// TODO
-    template <typename ConnectHandler>
-    void handle_connect(socket_ptr socket, ConnectHandler handler,
-        const boost::system::error_code & connect_ec)
-    {
-        if (connect_ec) {
-            handler(connect_ec);
-            return;
-        }
-
-        boost::system::error_code ec;
-
-        detail::recv_msghdr::ptr msghdr_ptr(new class detail::recv_msghdr());
-
-        // start the task to asyncronously receive the s2c pipe endpoint
-        async_recv_fd(msghdr_ptr, socket, handler);
-    }
-
-    /// TODO
-    template <typename ConnectHandler>
-    void async_recv_fd(detail::recv_msghdr::ptr msghdr_ptr, socket_ptr socket,
-        ConnectHandler handler)
-    {
-        boost::system::error_code ec;
-        
-        int pipe = detail::recv_fd(socket->native_handle(), msghdr_ptr, ec);
-        if (ec) {
-            if (ec == boost::system::errc::make_error_code(boost::system::errc::operation_would_block)) {
-                // If the error is "would block" push an async task to wait until
-                // this socket is ready.
-                socket->async_read_some(boost::asio::null_buffers(),boost::bind(
-                    &endpoint::handle_recv_fd<ConnectHandler>,
-                    this,msghdr_ptr,socket,handler,::_1
-                ));
-            } else {
-                // TODO: close fds? Technically they will be wrapped in stream
-                // descriptors that own them. We could potentially close fds
-                // a bit sooner than endpoint destruction. Is it worth it?
-                handler(ec);
-            }
-            return;
-        }
-
-        // TODO: is `is_open` the best way to test this? State variable instead?
-        if (!m_input.is_open()) {
-            m_input.assign(pipe);
-
-            // start reading output pipe
-            msghdr_ptr.reset(new class detail::recv_msghdr());
-
-            async_recv_fd(msghdr_ptr, socket, handler);
-        } else if (!m_output.is_open()) {
-            m_output.assign(pipe);
-
-            // send ack
-            boost::asio::async_write(
-                *socket,
-                boost::asio::buffer("ack", 3),
-                boost::bind(
-                    &endpoint::handle_write_ack<ConnectHandler>,
-                    this,
-                    socket,
-                    handler,
-                    ::_1,
-                    ::_2
-                )
-            );
-        } else {
-            // TODO: close fds? Technically they will be wrapped in stream
-            // descriptors that own them. We could potentially close fds
-            // a bit sooner than endpoint destruction. Is it worth it?
-            handler(make_error_code(error::general));
-        }
-    }
-
-    /// TODO
-    template <typename ConnectHandler>
-    void handle_recv_fd(detail::recv_msghdr::ptr msghdr_ptr, socket_ptr socket,
-        ConnectHandler handler, const boost::system::error_code & ec)
-    {
-        if (ec) {
-            // TODO: close fds? Technically they will be wrapped in stream
-            // descriptors that own them. We could potentially close fds
-            // a bit sooner than endpoint destruction. Is it worth it?
-            handler(ec);
-        } else {
-            // retry
-            async_recv_fd(msghdr_ptr, socket, handler);
-        }
-    }
-
-    /// TODO
-    template <typename ConnectHandler>
-    void handle_write_ack(socket_ptr socket, ConnectHandler handler,
-        const boost::system::error_code & ec, size_t bytes_transferred)
-    {
-        if (ec) {
-            // TODO: close fds? Technically they will be wrapped in stream
-            // descriptors that own them. We could potentially close fds
-            // a bit sooner than endpoint destruction. Is it worth it?
-            handler(error::make_error_code(error::ack_failed));
-        } else {
-            handler(ec);
-        }
-    }
-
-    /// TODO
+    /// Semi-private helper method that initiates the pipe exchange
+    /**
+     * TODO: should this be private and acceptor be labeled friend?
+     *
+     * @param socket The socket to use to exchange pipe information
+     * @return A status code indicating the error that ocurred, if any
+     */
     template <typename Socket>
     boost::system::error_code init_pipes(Socket & socket) {
         boost::system::error_code ec;
@@ -433,8 +419,7 @@ public:
             m_input.assign(::dup(pp.c2s_pipe[0]));
             m_output.assign(::dup(pp.s2c_pipe[1]));
             
-            // Send the remaining two pipe endpoints over the socket to the
-            // client.
+            // Send the remaining two pipe endpoints over the socket to the client.
             detail::send_fd(socket.native_handle(), pp.s2c_pipe[0]);
             detail::send_fd(socket.native_handle(), pp.c2s_pipe[1]);
             
@@ -451,7 +436,13 @@ public:
         }
     }
 
-    /// TODO
+    /// Semi-private helper method that asynchronously initiates the pipe exchange
+    /**
+     * TODO: should this be private and acceptor be labeled friend?
+     *
+     * @param socket The socket to use to exchange pipe information
+     * @return A status code indicating the error that ocurred, if any
+     */
     template <typename AcceptHandler>
     void async_init_pipes(socket_ptr socket, AcceptHandler handler) {
         try {
@@ -478,19 +469,6 @@ public:
                 )
             );
         } catch (boost::system::error_code & ec) {
-            handler(ec);
-        }
-    }
-
-    /// TODO
-    template <typename AcceptHandler>
-    void handle_read_ack(socket_ptr socket, detail::pipe_pair::ptr pp,
-        AcceptHandler handler, const boost::system::error_code & ec,
-        size_t bytes_transferred)
-    {
-        if (ec || bytes_transferred != 3 || strncmp(pp->ack_data, "ack", 3) != 0) {
-            handler(error::make_error_code(error::ack_failed));
-        } else {
             handler(ec);
         }
     }
@@ -604,11 +582,130 @@ public:
         return m_io_service;
     }
 private:
+    /// Internal handler for async_connect
+    template <typename ConnectHandler>
+    void handle_connect(socket_ptr socket, ConnectHandler handler,
+        const boost::system::error_code & connect_ec)
+    {
+        if (connect_ec) {
+            handler(connect_ec);
+            return;
+        }
+
+        boost::system::error_code ec;
+
+        detail::recv_msghdr::ptr msghdr_ptr(new class detail::recv_msghdr());
+
+        // start the task to asyncronously receive the s2c pipe endpoint
+        async_recv_fd(msghdr_ptr, socket, handler);
+    }
+
+    /// Internal helper for initiating reads into `detail::recv_fd`
+    template <typename ConnectHandler>
+    void async_recv_fd(detail::recv_msghdr::ptr msghdr_ptr, socket_ptr socket,
+        ConnectHandler handler)
+    {
+        boost::system::error_code ec;
+        
+        int pipe = detail::recv_fd(socket->native_handle(), msghdr_ptr, ec);
+        if (ec) {
+            if (ec == boost::system::errc::make_error_code(boost::system::errc::operation_would_block)) {
+                // If the error is "would block" push an async task to wait until
+                // this socket is ready.
+                socket->async_read_some(boost::asio::null_buffers(),boost::bind(
+                    &endpoint::handle_recv_fd<ConnectHandler>,
+                    this,msghdr_ptr,socket,handler,::_1
+                ));
+            } else {
+                // TODO: close fds? Technically they will be wrapped in stream
+                // descriptors that own them. We could potentially close fds
+                // a bit sooner than endpoint destruction. Is it worth it?
+                handler(ec);
+            }
+            return;
+        }
+
+        // TODO: is `is_open` the best way to test this? State variable instead?
+        if (!m_input.is_open()) {
+            m_input.assign(pipe);
+
+            // start reading output pipe
+            msghdr_ptr.reset(new class detail::recv_msghdr());
+
+            async_recv_fd(msghdr_ptr, socket, handler);
+        } else if (!m_output.is_open()) {
+            m_output.assign(pipe);
+
+            // send ack
+            boost::asio::async_write(
+                *socket,
+                boost::asio::buffer("ack", 3),
+                boost::bind(
+                    &endpoint::handle_write_ack<ConnectHandler>,
+                    this,
+                    socket,
+                    handler,
+                    ::_1,
+                    ::_2
+                )
+            );
+        } else {
+            // TODO: close fds? Technically they will be wrapped in stream
+            // descriptors that own them. We could potentially close fds
+            // a bit sooner than endpoint destruction. Is it worth it?
+            handler(make_error_code(error::general));
+        }
+    }
+
+    /// Internal handler for async_recv_fd
+    template <typename ConnectHandler>
+    void handle_recv_fd(detail::recv_msghdr::ptr msghdr_ptr, socket_ptr socket,
+        ConnectHandler handler, const boost::system::error_code & ec)
+    {
+        if (ec) {
+            // TODO: close fds? Technically they will be wrapped in stream
+            // descriptors that own them. We could potentially close fds
+            // a bit sooner than endpoint destruction. Is it worth it?
+            handler(ec);
+        } else {
+            // retry
+            async_recv_fd(msghdr_ptr, socket, handler);
+        }
+    }
+
+    /// Internal handler for async_write of acknowledgement messages
+    template <typename ConnectHandler>
+    void handle_write_ack(socket_ptr socket, ConnectHandler handler,
+        const boost::system::error_code & ec, size_t bytes_transferred)
+    {
+        if (ec) {
+            // TODO: close fds? Technically they will be wrapped in stream
+            // descriptors that own them. We could potentially close fds
+            // a bit sooner than endpoint destruction. Is it worth it?
+            handler(error::make_error_code(error::ack_failed));
+        } else {
+            handler(ec);
+        }
+    }
+
+    /// Internal helper for async_read of acknowledgement messages
+    template <typename AcceptHandler>
+    void handle_read_ack(socket_ptr socket, detail::pipe_pair::ptr pp,
+        AcceptHandler handler, const boost::system::error_code & ec,
+        size_t bytes_transferred)
+    {
+        if (ec || bytes_transferred != 3 || strncmp(pp->ack_data, "ack", 3) != 0) {
+            handler(error::make_error_code(error::ack_failed));
+        } else {
+            handler(ec);
+        }
+    }
+
     boost::asio::io_service & m_io_service;
     
     boost::asio::posix::stream_descriptor m_input;
     boost::asio::posix::stream_descriptor m_output;
-};
+}; // class endpoint
 
 
 } // namespace asio_pipe_transport

@@ -124,7 +124,7 @@ public:
 
     /// Start an asynchronous accept for a new pipe transport connection
     /**
-     * This function is used to asynchronously initiate a pipe transport
+     * This function is used to asynchronously accept a pipe transport
      * connection. The function call always returns immediately.
      *
      * A sequence of asyncronous actions will be started that wait for a 

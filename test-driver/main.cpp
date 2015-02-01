@@ -13,6 +13,8 @@
 
 #include <thread>
 
+#include <sys/stat.h>
+
 using namespace bandit;
 using asio_pipe_transport::acceptor;
 using asio_pipe_transport::endpoint;
@@ -31,7 +33,7 @@ describe("syncronous asio_pipe_transport", []() {
         ::unlink("/tmp/test");
         s_service.reset(new boost::asio::io_service());
         c_service.reset(new boost::asio::io_service());
-        acceptor.reset(new class acceptor(*s_service,"/tmp/test"));
+        acceptor.reset(new asio_pipe_transport::acceptor(*s_service,"/tmp/test"));
         s_endpoint.reset(new endpoint(*s_service));
         s_endpoint2.reset(new endpoint(*s_service));
         c_endpoint.reset(new endpoint(*c_service));
@@ -104,36 +106,6 @@ describe("syncronous asio_pipe_transport", []() {
             AssertThat(ec, Equals(boost::system::error_code( boost::system::errc::no_such_file_or_directory, boost::system::system_category())));
         });
     });
-    
-    // TODO: accepting while already accepting seems to work.. should it?
-    /*describe("accept while already accepting", [&]() {
-        boost::system::error_code s_ec1;
-        boost::system::error_code s_ec2;
-        boost::system::error_code c_ec;
-        
-        before_each([&]() {
-            std::thread server1([&](){
-                s_ec1 = acceptor->accept(*s_endpoint);
-            });
-            std::thread server2([&](){
-                s_ec2 = acceptor->accept(*s_endpoint2);
-            });
-            std::thread client([&](){
-                sleep(5);
-                c_ec = c_endpoint->connect("/tmp/test");
-                c_ec = c_endpoint->connect("/tmp/test");
-            });
-            server1.join();
-            server2.join();
-            client.join();
-        });
-
-        it("should match", [&]() {
-            AssertThat(s_ec1, Equals(boost::system::error_code()));
-            AssertThat(s_ec2, Equals(boost::system::error_code()));
-            AssertThat(c_ec, Equals(boost::system::error_code()));
-        });
-    });*/
 });
 
 describe("asyncronous asio_pipe_transport", []() {
@@ -145,7 +117,7 @@ describe("asyncronous asio_pipe_transport", []() {
     before_each([&]() {
         ::unlink("/tmp/test");
         service.reset(new boost::asio::io_service());
-        acceptor.reset(new class acceptor(*service,"/tmp/test"));
+        acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test"));
         s_endpoint.reset(new endpoint(*service));
         c_endpoint.reset(new endpoint(*service));
     });
@@ -205,14 +177,101 @@ describe("asyncronous asio_pipe_transport", []() {
     });
 });
 
+describe("an acceptor", []() {
+    std::unique_ptr<acceptor> acceptor;
+    std::unique_ptr<boost::asio::io_service> service;
+    struct stat buf;
+    boost::system::error_code ec;
+
+    before_each([&]() {
+        ::unlink("/tmp/test");
+        service.reset(new boost::asio::io_service());
+    });
+    
+    after_each([&]() {
+        acceptor.reset();
+        service.reset();
+        ::unlink("/tmp/test");
+    });
+
+    describe("with default cleanup settings should", [&]() {
+        before_each([&]() {
+            acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test"));
+        });
+
+        it("clean up its socket file", [&]() {
+            AssertThat(stat("/tmp/test", &buf), Equals(0));
+            acceptor.reset();
+            AssertThat(stat("/tmp/test", &buf), Equals(-1));
+            AssertThat(errno, Equals(ENOENT));
+        });
+    });
+
+    describe("with cleanup disabled should", [&]() {
+        before_each([&]() {
+            acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",false));
+        });
+
+        it("leave the socket file", [&]() {
+            AssertThat(stat("/tmp/test", &buf), Equals(0));
+            acceptor.reset();
+            AssertThat(stat("/tmp/test", &buf), Equals(0));
+        });
+    });
+
+    // Pending confirmation on "socket already in use" behavior
+    /*describe("with default takeover settings should", [&]() {
+        before_each([&]() {
+            try {
+                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",false));
+                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",true));
+            } catch (std::exception & e) {
+                ec = e;
+            }
+        });
+
+        it("leave the socket file if it existed already", [&]() {
+            AssertThat(stat("/tmp/test", &buf), Equals(0));
+            acceptor.reset();
+            AssertThat(stat("/tmp/test", &buf), Equals(0));
+        });
+    });*/
+
+    describe("with default settings should", [&]() {
+        before_each([&]() {
+            try {
+                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",false));
+                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test"));
+            } catch (boost::system::system_error & e) {
+                ec = e.code();
+            }
+        });
+
+        it("fail to bind when the address exists", [&]() {
+            AssertThat(ec, Equals(boost::system::error_code( boost::system::errc::address_in_use, boost::system::system_category())));
+        });
+    });
+
+    describe("with bogus path should", [&]() {
+        before_each([&]() {
+            try {
+                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/ad8db799-b01f-45fa-964d-c540eb4749ec/test"));
+            } catch (boost::system::system_error & e) {
+                ec = e.code();
+            }
+        });
+
+        it("fail to bind", [&]() {
+            AssertThat(ec, Equals(boost::system::error_code( boost::system::errc::no_such_file_or_directory, boost::system::system_category())));
+        });
+    });
+});
+
 });
 
 
 
 // listen, connect, send/recv in both directions
-
-// listen when there is already a socket file
-// listen when the path is bogus
 
 // read/write before opening
 // read/write after close

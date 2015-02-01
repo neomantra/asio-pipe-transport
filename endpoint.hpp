@@ -306,6 +306,11 @@ public:
         , m_output(service)
     {}
 
+    // TODO: copy constructor
+    // TODO: copy assignment operator
+    // TODO: move constructor
+    // TODO: move assignment operator
+
     /// Establish a pipe connection by connecting to a pipe transport acceptor
     /**
      * Connect to a pipe transport acceptor listening at the given Unix domain

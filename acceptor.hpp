@@ -17,7 +17,6 @@
 
 #include <boost/asio.hpp>
 #include <boost/bind.hpp>
-#include <boost/move/utility.hpp>
 
 #ifndef BOOST_ASIO_HAS_LOCAL_SOCKETS
     static_assert("This version of Asio does not support local sockets");
@@ -66,22 +65,25 @@ public:
       , m_cleanup_socket(cleanup_socket)
     {}
 
+    acceptor(const acceptor & p) = delete;
+    acceptor & operator=(const acceptor & p) = delete;
+
     /// Move constructor
-    acceptor(BOOST_RV_REF(acceptor) other)
+    acceptor(acceptor && other)
       : m_io_service(&other.get_service())
       , m_endpoint(other.m_endpoint)
-      , m_acceptor(boost::move(other.m_acceptor))
+      , m_acceptor(std::move(other.m_acceptor))
       , m_cleanup_socket(other.m_cleanup_socket)
     {}
 
     /// Move assignment operator
-    acceptor & operator=(BOOST_RV_REF(acceptor) other) {
+    acceptor & operator=(acceptor && other) {
         if (m_cleanup_socket) {
             ::unlink(m_endpoint.path().c_str());
         }
         m_io_service = &other.get_service();
         m_endpoint = other.m_endpoint;
-        m_acceptor = boost::move(other.m_acceptor);
+        m_acceptor = std::move(other.m_acceptor);
         m_cleanup_socket = other.m_cleanup_socket;
 
         return *this;
@@ -160,8 +162,6 @@ public:
         );
     }
 private:
-    BOOST_MOVABLE_BUT_NOT_COPYABLE(acceptor)
-
     /// Internal helper to retrieve the io_service
     boost::asio::io_service & get_service() {
         return *m_io_service;

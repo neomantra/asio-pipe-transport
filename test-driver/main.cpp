@@ -19,6 +19,11 @@ using namespace bandit;
 using asio_pipe_transport::acceptor;
 using asio_pipe_transport::endpoint;
 
+boost::system::error_code make_error(boost::system::errc::errc_t code) {
+    // TODO: is this portible enough?
+    return boost::system::error_code(code, boost::system::system_category());
+}
+
 go_bandit([](){
 
 describe("syncronous asio_pipe_transport", []() {
@@ -88,22 +93,6 @@ describe("syncronous asio_pipe_transport", []() {
             AssertThat(sent, Equals(3));
             AssertThat(read, Equals(3));
             AssertThat(std::string(data,3), Equals("foo"));
-        });
-    });
-    
-    describe("connect to file that doesn't exist", [&]() {
-        boost::system::error_code ec;
-        
-        before_each([&]() {
-            std::thread client([&](){
-                ec = c_endpoint->connect("/tmp/21812770-9d7e-11e4-bd06-0800200c9a66");
-            });
-            client.join();
-        });
-
-        it("should match", [&]() {
-            // TODO: is this portible enough?
-            AssertThat(ec, Equals(boost::system::error_code( boost::system::errc::no_such_file_or_directory, boost::system::system_category())));
         });
     });
 });
@@ -178,7 +167,7 @@ describe("asyncronous asio_pipe_transport", []() {
 });
 
 describe("an acceptor", []() {
-    std::unique_ptr<acceptor> acceptor;
+    std::unique_ptr<acceptor> a;
     std::unique_ptr<boost::asio::io_service> service;
     struct stat buf;
     boost::system::error_code ec;
@@ -189,83 +178,122 @@ describe("an acceptor", []() {
     });
     
     after_each([&]() {
-        acceptor.reset();
+        a.reset();
         service.reset();
         ::unlink("/tmp/test");
     });
 
-    describe("with default cleanup settings should", [&]() {
-        before_each([&]() {
-            acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test"));
-        });
+    it("cleans up its socket file by default", [&]() {
+        a.reset(new acceptor(*service,"/tmp/test"));
 
-        it("clean up its socket file", [&]() {
-            AssertThat(stat("/tmp/test", &buf), Equals(0));
-            acceptor.reset();
-            AssertThat(stat("/tmp/test", &buf), Equals(-1));
-            AssertThat(errno, Equals(ENOENT));
-        });
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
+        a.reset();
+        AssertThat(stat("/tmp/test", &buf), Equals(-1));
+        AssertThat(errno, Equals(ENOENT));
     });
 
-    describe("with cleanup disabled should", [&]() {
-        before_each([&]() {
-            acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",false));
-        });
+    it("leaves the socket file if cleanup is false", [&]() {
+        a.reset(new acceptor(*service,"/tmp/test",false));
 
-        it("leave the socket file", [&]() {
-            AssertThat(stat("/tmp/test", &buf), Equals(0));
-            acceptor.reset();
-            AssertThat(stat("/tmp/test", &buf), Equals(0));
-        });
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
+        a.reset();
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
     });
 
     // Pending confirmation on "socket already in use" behavior
-    /*describe("with default takeover settings should", [&]() {
-        before_each([&]() {
-            try {
-                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",false));
-                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",true));
-            } catch (std::exception & e) {
-                ec = e;
-            }
-        });
+    /*it("leaves the socket file if it existed already", [&]() {
+        try {
+            a.reset(new acceptor(*service,"/tmp/test",false));
+            a.reset(new acceptor(*service,"/tmp/test",true));
+        } catch (std::exception & e) {
+            ec = e;
+        }
 
-        it("leave the socket file if it existed already", [&]() {
-            AssertThat(stat("/tmp/test", &buf), Equals(0));
-            acceptor.reset();
-            AssertThat(stat("/tmp/test", &buf), Equals(0));
-        });
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
+        a.reset();
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
     });*/
 
-    describe("with default settings should", [&]() {
-        before_each([&]() {
-            try {
-                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test",false));
-                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/test"));
-            } catch (boost::system::system_error & e) {
-                ec = e.code();
-            }
-        });
+    it("fails to bind when the socket path exists", [&]() {
+        a.reset(new acceptor(*service,"/tmp/test",false));
 
-        it("fail to bind when the address exists", [&]() {
-            AssertThat(ec, Equals(boost::system::error_code( boost::system::errc::address_in_use, boost::system::system_category())));
-        });
+        AssertThrows(boost::system::system_error,
+            a.reset(new acceptor(*service,"/tmp/test")));
+
+        AssertThat(LastException<boost::system::system_error>().code(),
+            Equals(make_error(boost::system::errc::address_in_use)));
     });
 
-    describe("with bogus path should", [&]() {
-        before_each([&]() {
-            try {
-                acceptor.reset(new asio_pipe_transport::acceptor(*service,"/tmp/ad8db799-b01f-45fa-964d-c540eb4749ec/test"));
-            } catch (boost::system::system_error & e) {
-                ec = e.code();
-            }
-        });
+    it("fails to bind to bogus paths", [&]() {
+        AssertThrows(boost::system::system_error,
+            a.reset(new acceptor(*service,"/tmp/ad8db799-b01f-45fa-964d-c540eb4749ec/test")));
 
-        it("fail to bind", [&]() {
-            AssertThat(ec, Equals(boost::system::error_code( boost::system::errc::no_such_file_or_directory, boost::system::system_category())));
-        });
+        AssertThat(LastException<boost::system::system_error>().code(),
+            Equals(make_error(boost::system::errc::no_such_file_or_directory)));
+    });
+
+    it("is move constructable", [&]() {
+        a.reset(new acceptor(*service,"/tmp/test"));
+
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
+        {
+            acceptor a2(std::move(*a));
+            a.release();
+
+            AssertThat(stat("/tmp/test", &buf), Equals(0));
+        }
+        AssertThat(stat("/tmp/test", &buf), Equals(-1));
+    });
+
+    it("is move assignable", [&]() {
+        a.reset(new acceptor(*service,"/tmp/test"));
+        acceptor a2(*service,"/tmp/test2");
+
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
+        AssertThat(stat("/tmp/test2", &buf), Equals(0));
+
+        a2 = std::move(*a);
+
+        AssertThat(stat("/tmp/test", &buf), Equals(0));
+        AssertThat(stat("/tmp/test2", &buf), Equals(-1));
     });
 });
+
+
+
+describe("an endpoint", []() {
+    std::unique_ptr<boost::asio::io_service> service;
+    boost::system::error_code ec;
+
+    before_each([&]() {
+        ec = boost::system::error_code();
+        ::unlink("/tmp/test");
+        service.reset(new boost::asio::io_service());
+    });
+
+    it("can't be read or written to before being connected", [&]() {
+        endpoint e(*service);
+
+        boost::asio::write(e,boost::asio::buffer("foo",3), ec);
+        AssertThat(ec, Equals(make_error(boost::system::errc::bad_file_descriptor)));
+
+        char data[3];
+
+        boost::asio::read(e,boost::asio::buffer(data,3), ec);
+        AssertThat(ec, Equals(make_error(boost::system::errc::bad_file_descriptor)));
+    });
+
+    it("can't connect to socket file that doesn't exist", [&]() {
+        endpoint e(*service);
+
+        ec = e.connect("/tmp/21812770-9d7e-11e4-bd06-0800200c9a66");
+        AssertThat(ec, Equals(make_error(boost::system::errc::no_such_file_or_directory)));
+    });
+
+    // TODO endpoint move constructor / assignment
+});
+
+
 
 });
 
@@ -273,7 +301,6 @@ describe("an acceptor", []() {
 
 // listen, connect, send/recv in both directions
 
-// read/write before opening
 // read/write after close
 
 // accept two connections with one acceptor

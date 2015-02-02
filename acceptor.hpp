@@ -1,5 +1,5 @@
 //
-//  acceptor.h
+//  acceptor.hpp
 //  asio_pipe_transport
 //
 //  Created by Peter Thorson on 2015-01-07.
@@ -11,12 +11,10 @@
 
 #include "endpoint.hpp"
 
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-
 #include <boost/asio.hpp>
 #include <boost/bind.hpp>
+#include <boost/shared_ptr.hpp>
+#include <boost/system/error_code.hpp>
 
 #ifndef BOOST_ASIO_HAS_LOCAL_SOCKETS
     static_assert("This version of Asio does not support local sockets");
@@ -25,6 +23,10 @@
 #ifndef BOOST_ASIO_HAS_POSIX_STREAM_DESCRIPTOR
     static_assert("This version of Asio does not support POSIX stream descriptors");
 #endif
+
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
 #include <algorithm>
 #include <iostream>

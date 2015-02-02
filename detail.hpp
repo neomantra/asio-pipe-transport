@@ -9,6 +9,8 @@
 #ifndef _ASIO_PIPE_TRANSPORT_DETAIL_
 #define _ASIO_PIPE_TRANSPORT_DETAIL_
 
+#include "error.hpp"
+
 #include <boost/shared_ptr.hpp>
 #include <boost/system/error_code.hpp>
 

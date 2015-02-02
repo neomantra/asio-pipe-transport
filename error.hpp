@@ -30,6 +30,7 @@ enum value {
     early_close
 }; // enum value
 
+/// Library level error category
 class category : public boost::system::error_category {
 public:
     category() {}
@@ -59,6 +60,7 @@ inline const boost::system::error_category & get_category() {
     return instance;
 }
 
+/// Helper function to create error codes in asio_pipe_transport category
 inline boost::system::error_code make_error_code(error::value e) {
     return boost::system::error_code(static_cast<int>(e), get_category());
 }

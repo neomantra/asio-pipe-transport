@@ -348,6 +348,14 @@ public:
     boost::asio::io_service & get_io_service() {
         return *m_io_service;
     }
+
+    /// Returns the number of bytes readable on the input pipe.
+    size_t bytes_readable() {
+        boost::asio::posix::stream_descriptor::bytes_readable command(true);
+        m_input.io_control(command);
+        return command.get();
+    }
+
 private:
     /// Internal handler for async_connect
     template <typename ConnectHandler>

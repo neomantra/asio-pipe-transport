@@ -66,22 +66,42 @@ describe("syncronous asio_pipe_transport", []() {
         size_t read;
         
         before_each([&]() {
+            std::cout << "parent mark 1" << std::endl;
             std::thread server([&](){
+                try {
+                    std::cout << "server mark" << std::endl;
                 s_ec = acceptor->accept(*s_endpoint);
+                    std::cout << "server mark 2" << std::endl;
             
                 if (!s_ec) {
+                    std::cout << "server mark 3" << std::endl;
                     sent = boost::asio::write(*s_endpoint, boost::asio::buffer("foo", 3), write_ec);
+                }
+                    std::cout << "server mark 4" << std::endl;
+                } catch (std::exception & e) {
+                    std::cout << e.what() << std::endl;
                 }
             });
             std::thread client([&](){
+                try {
+                    std::cout << "client mark 1" << std::endl;
                 c_ec = c_endpoint->connect("/tmp/test");
+                    std::cout << "client mark 2" << std::endl;
         
                 if (!c_ec) {
+                    std::cout << "client mark 3" << std::endl;
                     read = boost::asio::read(*c_endpoint, boost::asio::buffer(data, 3), read_ec);
                 }
+                    std::cout << "client mark 4" << std::endl;
+                } catch (std::exception & e) {
+                    std::cout << e.what() << std::endl;
+                }
             });
+            std::cout << "parent mark 2" << std::endl;
             server.join();
+            std::cout << "parent mark 3" << std::endl;
             client.join();
+            std::cout << "parent mark 4" << std::endl;
         });
 
         it("should match", [&]() {

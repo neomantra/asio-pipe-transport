@@ -72,7 +72,7 @@ public:
 
     /// Move constructor
     acceptor(acceptor && other)
-      : m_io_service(&other.get_service())
+      : m_io_service(&other.get_io_service())
       , m_endpoint(other.m_endpoint)
       , m_acceptor(std::move(other.m_acceptor))
       , m_cleanup_socket(other.m_cleanup_socket)
@@ -83,7 +83,7 @@ public:
         if (m_cleanup_socket) {
             ::unlink(m_endpoint.path().c_str());
         }
-        m_io_service = &other.get_service();
+        m_io_service = &other.get_io_service();
         m_endpoint = other.m_endpoint;
         m_acceptor = std::move(other.m_acceptor);
         m_cleanup_socket = other.m_cleanup_socket;
@@ -113,7 +113,7 @@ public:
      * @return A status code indicating the error that ocurred, if any
      */
     boost::system::error_code accept(endpoint & endpoint) {
-        boost::asio::local::stream_protocol::socket socket(get_service());
+        boost::asio::local::stream_protocol::socket socket(get_io_service());
         
         boost::system::error_code ec;
         m_acceptor.accept(socket, ec);
@@ -149,7 +149,7 @@ public:
      */
     template <typename AcceptHandler>
     void async_accept(endpoint & endpoint, AcceptHandler handler) {
-        socket_ptr socket(new boost::asio::local::stream_protocol::socket(get_service()));
+        socket_ptr socket(new boost::asio::local::stream_protocol::socket(get_io_service()));
 
         m_acceptor.async_accept(
             *socket,
@@ -163,12 +163,18 @@ public:
             )
         );
     }
-private:
-    /// Internal helper to retrieve the io_service
-    boost::asio::io_service & get_service() {
+
+    /// Returns the io_service associated with the object.
+    boost::asio::io_service & get_io_service() {
         return *m_io_service;
     }
 
+    /// Returns the UNIX socket endpoint of this acceptor.
+    const boost::asio::local::stream_protocol::endpoint & get_endpoint() const {
+        return m_endpoint;
+    }
+
+private:
     /// Internal handler for Asyncronous accept
     template <typename AcceptHandler>
     void handle_async_accept(socket_ptr socket, endpoint & endpoint,
